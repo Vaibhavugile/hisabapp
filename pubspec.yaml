@@ -1,0 +1,37 @@
+name: hisaab_flutter
+description: Hisaab - business and personal ledger app built with Flutter and Firebase.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  firebase_core: ^3.15.2
+  firebase_auth: ^5.7.0
+  cloud_firestore: ^5.6.12
+  firebase_storage: ^12.4.10
+  firebase_messaging: ^15.2.10
+  cloud_functions: ^5.6.2
+  provider: ^6.1.5+1
+  google_fonts: ^6.3.2
+  intl: ^0.20.2
+  image_picker: ^1.2.3
+  shared_preferences: ^2.5.3
+  pdf: ^3.11.3
+  printing: ^5.14.2
+  share_plus: ^11.1.0
+  uuid: ^4.6.0
+  file_picker: ^11.0.3
+  url_launcher: ^6.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
