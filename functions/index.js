@@ -1,4 +1,6 @@
 
+'use strict';
+
 const {setGlobalOptions} = require('firebase-functions');
 const {onCall, HttpsError} = require('firebase-functions/v2/https');
 const {defineSecret} = require('firebase-functions/params');
@@ -21,28 +23,23 @@ const auth = admin.auth();
 // MSG91 configuration
 const MSG91_URL =
   'https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/';
-
 const MSG91_INTEGRATED_NUMBER = '15558299861';
 const MSG91_TEMPLATE = 'kiyuotp';
 const MSG91_LANGUAGE = 'en';
-const MSG91_NAMESPACE =
-  '60cbb046_c34d_4f04_8c62_2cb720ccf00d';
+const MSG91_NAMESPACE = '60cbb046_c34d_4f04_8c62_2cb720ccf00d';
 
 // OTP configuration
 const OTP_EXPIRY_MS = 60 * 1000;
 const RESEND_COOLDOWN_MS = 60 * 1000;
 const MAX_VERIFY_ATTEMPTS = 5;
 
-// --------------------------------------------------
+// -----------------------------------------------------------------------------
 // PHONE NUMBER NORMALIZATION
-// --------------------------------------------------
+// -----------------------------------------------------------------------------
 
 function normalizePhone(value) {
   if (typeof value !== 'string') {
-    throw new HttpsError(
-        'invalid-argument',
-        'Phone number is required.',
-    );
+    throw new HttpsError('invalid-argument', 'Phone number is required.');
   }
 
   const phone = value.replace(/[^\d+]/g, '');
@@ -57,46 +54,42 @@ function normalizePhone(value) {
   return phone;
 }
 
-// --------------------------------------------------
-// SECURE PHONE DOCUMENT KEY
-// --------------------------------------------------
-
 function phoneKey(phone) {
-  return crypto
-      .createHash('sha256')
-      .update(phone)
-      .digest('hex');
+  return crypto.createHash('sha256').update(phone).digest('hex');
 }
-
-// --------------------------------------------------
-// OTP HASH
-// --------------------------------------------------
 
 function otpHash(phone, otp) {
   return crypto
       .createHmac('sha256', MSG91_AUTHKEY.value())
-      .update(phone + ':' + otp)
+      .update(`${phone}:${otp}`)
       .digest('hex');
 }
 
-// --------------------------------------------------
-// CONSTANT-TIME HASH COMPARISON
-// --------------------------------------------------
-
 function safeHashCompare(hash1, hash2) {
+  if (typeof hash1 !== 'string' || typeof hash2 !== 'string') {
+    return false;
+  }
+
   const first = Buffer.from(hash1, 'hex');
   const second = Buffer.from(hash2, 'hex');
 
-  if (first.length !== second.length) {
+  if (first.length !== second.length || first.length === 0) {
     return false;
   }
 
   return crypto.timingSafeEqual(first, second);
 }
 
-// --------------------------------------------------
-// SEND MSG91 WHATSAPP OTP
-// --------------------------------------------------
+function getAccountInvitedPhone(account) {
+  return account.invitedPhoneNormalized ||
+    account.phoneNormalized ||
+    account.invitedPhone ||
+    '';
+}
+
+// -----------------------------------------------------------------------------
+// MSG91 WHATSAPP OTP
+// -----------------------------------------------------------------------------
 
 async function sendMsg91WhatsApp(phone, otp) {
   const payload = {
@@ -147,10 +140,8 @@ async function sendMsg91WhatsApp(phone, otp) {
 
   try {
     result = JSON.parse(responseText);
-  } catch (error) {
-    result = {
-      message: responseText,
-    };
+  } catch (_) {
+    result = {message: responseText};
   }
 
   if (
@@ -176,9 +167,83 @@ async function sendMsg91WhatsApp(phone, otp) {
   return result;
 }
 
-// --------------------------------------------------
+// -----------------------------------------------------------------------------
+// LINK A VERIFIED USER TO AN INVITED SHARED ACCOUNT
+// -----------------------------------------------------------------------------
+
+async function linkUserToInvitedAccounts(phone, user) {
+  const query = await db
+      .collection('accounts')
+      .where('isShared', '==', true)
+      .where('phoneNormalized', '==', phone)
+      .get();
+
+  if (query.empty) return 0;
+
+  let linkedCount = 0;
+  const batchSize = 400;
+
+  for (let start = 0; start < query.docs.length; start += batchSize) {
+    const batch = db.batch();
+    const docs = query.docs.slice(start, start + batchSize);
+    let writes = 0;
+
+    for (const accountDoc of docs) {
+      const account = accountDoc.data();
+
+      // Never link an owner to their own invitation.
+      if (account.ownerId === user.uid) continue;
+
+      // Do not overwrite a different linked user.
+      if (
+        account.linkedUserId &&
+        account.linkedUserId !== user.uid
+      ) {
+        logger.warn('Shared account already linked to another user', {
+          accountId: accountDoc.id,
+        });
+
+        continue;
+      }
+
+      // Confirm that the invited phone matches the verified phone.
+      if (getAccountInvitedPhone(account) !== phone) continue;
+
+      const memberIds = Array.isArray(account.memberIds) ?
+        account.memberIds.map(String) :
+        [];
+
+      if (!memberIds.includes(user.uid)) {
+        memberIds.push(user.uid);
+      }
+
+      batch.update(accountDoc.ref, {
+        linkedUserId: user.uid,
+        linkedUserName: user.displayName || user.phoneNumber || null,
+        memberIds,
+        isShared: true,
+        sharingStatus: 'shared',
+        joinedAt:
+          account.joinedAt ||
+          admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      writes++;
+      linkedCount++;
+    }
+
+    if (writes > 0) {
+      await batch.commit();
+    }
+  }
+
+  return linkedCount;
+}
+
+// -----------------------------------------------------------------------------
 // SEND WHATSAPP OTP
-// --------------------------------------------------
+// -----------------------------------------------------------------------------
 
 exports.sendWhatsAppOtp = onCall(
     {
@@ -201,7 +266,6 @@ exports.sendWhatsAppOtp = onCall(
           .randomInt(100000, 1000000)
           .toString();
 
-      // Create OTP challenge with resend protection.
       await db.runTransaction(async (transaction) => {
         const snapshot = await transaction.get(ref);
 
@@ -210,8 +274,7 @@ exports.sendWhatsAppOtp = onCall(
 
           if (
             previous.lastSentAt &&
-          now - previous.lastSentAt.toMillis() <
-            RESEND_COOLDOWN_MS
+          now - previous.lastSentAt.toMillis() < RESEND_COOLDOWN_MS
           ) {
             throw new HttpsError(
                 'resource-exhausted',
@@ -221,7 +284,7 @@ exports.sendWhatsAppOtp = onCall(
         }
 
         transaction.set(ref, {
-          phone: phone,
+          phone,
           otpHash: otpHash(phone, otp),
 
           createdAt:
@@ -240,7 +303,6 @@ exports.sendWhatsAppOtp = onCall(
         });
       });
 
-      // Send OTP using MSG91.
       try {
         await sendMsg91WhatsApp(phone, otp);
       } catch (error) {
@@ -266,9 +328,9 @@ exports.sendWhatsAppOtp = onCall(
     },
 );
 
-// --------------------------------------------------
+// -----------------------------------------------------------------------------
 // VERIFY WHATSAPP OTP
-// --------------------------------------------------
+// -----------------------------------------------------------------------------
 
 exports.verifyWhatsAppOtp = onCall(
     {
@@ -279,7 +341,6 @@ exports.verifyWhatsAppOtp = onCall(
       const data = request.data || {};
 
       const phone = normalizePhone(data.phone);
-
       const otp = String(data.otp || '').trim();
 
       if (!/^\d{6}$/.test(otp)) {
@@ -297,9 +358,7 @@ exports.verifyWhatsAppOtp = onCall(
 
       const suppliedHash = otpHash(phone, otp);
 
-      // IMPORTANT:
-      // Return error codes from the transaction instead of
-      // throwing inside it, so incorrect-attempt updates commit.
+      // Return status strings so failed-attempt updates are committed.
       const verificationResult = await db.runTransaction(
           async (transaction) => {
             const snapshot = await transaction.get(ref);
@@ -314,27 +373,18 @@ exports.verifyWhatsAppOtp = onCall(
               return 'USED';
             }
 
-            if (
-              challenge.expiresAt.toMillis() < Date.now()
-            ) {
+            if (challenge.expiresAt.toMillis() < Date.now()) {
               transaction.delete(ref);
               return 'EXPIRED';
             }
 
-            if (
-              challenge.attempts >= MAX_VERIFY_ATTEMPTS
-            ) {
+            if ((challenge.attempts || 0) >= MAX_VERIFY_ATTEMPTS) {
               transaction.delete(ref);
               return 'TOO_MANY';
             }
 
-            if (
-              !safeHashCompare(
-                  challenge.otpHash,
-                  suppliedHash,
-              )
-            ) {
-              const nextAttempts = challenge.attempts + 1;
+            if (!safeHashCompare(challenge.otpHash, suppliedHash)) {
+              const nextAttempts = (challenge.attempts || 0) + 1;
 
               if (nextAttempts >= MAX_VERIFY_ATTEMPTS) {
                 transaction.delete(ref);
@@ -350,7 +400,6 @@ exports.verifyWhatsAppOtp = onCall(
 
             transaction.update(ref, {
               verified: true,
-
               verifiedAt:
             admin.firestore.FieldValue.serverTimestamp(),
             });
@@ -387,19 +436,15 @@ exports.verifyWhatsAppOtp = onCall(
       };
 
       if (verificationResult !== 'VERIFIED') {
-        const errorDetails =
-        verificationErrors[verificationResult];
+        const details = verificationErrors[verificationResult];
 
         throw new HttpsError(
-            errorDetails[0],
-            errorDetails[1],
+            details[0],
+            details[1],
         );
       }
 
-      // --------------------------------------------------
-      // FIND OR CREATE FIREBASE USER
-      // --------------------------------------------------
-
+      // Find or create the Firebase user for this verified phone.
       let user;
 
       try {
@@ -420,15 +465,11 @@ exports.verifyWhatsAppOtp = onCall(
           });
         } catch (createError) {
           if (
-            createError.code ===
-          'auth/phone-number-already-exists'
+            createError.code === 'auth/phone-number-already-exists'
           ) {
             user = await auth.getUserByPhoneNumber(phone);
           } else {
-            logger.error(
-                'Firebase user creation failed',
-                createError,
-            );
+            logger.error('Firebase user creation failed', createError);
 
             throw new HttpsError(
                 'internal',
@@ -438,90 +479,22 @@ exports.verifyWhatsAppOtp = onCall(
         }
       }
 
-      // --------------------------------------------------
-      // GENERATE FIREBASE CUSTOM TOKEN
-      // --------------------------------------------------
+      // Link all shared accounts matching this verified phone.
+      try {
+        await linkUserToInvitedAccounts(phone, user);
+      } catch (error) {
+        logger.error('Automatic shared-account linking failed', {
+          uid: user.uid,
+          error,
+        });
 
-      const customToken = await auth.createCustomToken(
-          user.uid,
-      );
-
-      // --------------------------------------------------
-      // AUTOMATIC SHARED ACCOUNT LINKING
-      // --------------------------------------------------
-
-      const accountQuery = await db
-          .collection('accounts')
-          .where('isShared', '==', true)
-          .where('phoneNormalized', '==', phone)
-          .get();
-
-      const accountDocs = accountQuery.docs;
-
-      // Firestore batch limit is 500 writes.
-      // Use smaller batches to support multiple accounts.
-      const batchSize = 400;
-
-      for (
-        let start = 0;
-        start < accountDocs.length;
-        start += batchSize
-      ) {
-        const batch = db.batch();
-
-        const currentDocs = accountDocs.slice(
-            start,
-            start + batchSize,
-        );
-
-        for (const accountDoc of currentDocs) {
-          const account = accountDoc.data();
-
-          // Do not link the owner to their own account.
-          if (account.ownerId === user.uid) {
-            continue;
-          }
-
-          // Do not replace an account already linked
-          // to a different user.
-          if (
-            account.linkedUserId &&
-          account.linkedUserId !== user.uid
-          ) {
-            logger.warn(
-                'Shared account already linked to another user',
-                {
-                  accountId: accountDoc.id,
-                },
-            );
-
-            continue;
-          }
-
-          const members = Array.isArray(account.memberIds) ?
-          account.memberIds.slice() :
-          [];
-
-          if (!members.includes(user.uid)) {
-            members.push(user.uid);
-          }
-
-          batch.update(accountDoc.ref, {
-            linkedUserId: user.uid,
-            memberIds: members,
-
-            updatedAt:
-            admin.firestore.FieldValue.serverTimestamp(),
-          });
-        }
-
-        await batch.commit();
+      // Authentication can still succeed if account linking needs retry.
       }
 
-      // --------------------------------------------------
-      // DELETE USED OTP
-      // --------------------------------------------------
+      // Generate Firebase custom token.
+      const customToken = await auth.createCustomToken(user.uid);
 
+      // Delete the used OTP.
       await ref.delete();
 
       logger.info('WhatsApp OTP verification successful', {
@@ -531,9 +504,204 @@ exports.verifyWhatsAppOtp = onCall(
       return {
         success: true,
         message: 'Phone number verified successfully.',
-        customToken: customToken,
+        customToken,
         uid: user.uid,
         phoneNumber: phone,
+      };
+    },
+);
+
+// -----------------------------------------------------------------------------
+// LINK EXISTING REGISTERED USER WHEN OWNER CREATES A SHARED ACCOUNT
+// -----------------------------------------------------------------------------
+
+exports.linkExistingSharedAccount = onCall(
+    {
+      enforceAppCheck: false,
+    },
+    async (request) => {
+      if (!request.auth) {
+        throw new HttpsError(
+            'unauthenticated',
+            'Please log in first.',
+        );
+      }
+
+      const ownerUid = request.auth.uid;
+
+      const accountId = String(
+          request.data?.accountId || '',
+      ).trim();
+
+      if (!accountId) {
+        throw new HttpsError(
+            'invalid-argument',
+            'Account ID is required.',
+        );
+      }
+
+      const accountRef = db
+          .collection('accounts')
+          .doc(accountId);
+
+      const accountSnapshot = await accountRef.get();
+
+      if (!accountSnapshot.exists) {
+        throw new HttpsError(
+            'not-found',
+            'Account not found.',
+        );
+      }
+
+      const account = accountSnapshot.data();
+
+      // Only the account owner can initiate linking.
+      if (account.ownerId !== ownerUid) {
+        throw new HttpsError(
+            'permission-denied',
+            'Only the account owner can link a member.',
+        );
+      }
+
+      if (account.isShared !== true) {
+        throw new HttpsError(
+            'failed-precondition',
+            'This account is not configured as a shared account.',
+        );
+      }
+
+      const invitedPhone = normalizePhone(
+          account.invitedPhoneNormalized ||
+      account.phoneNormalized ||
+      account.phone,
+      );
+
+      // Find the registered Firebase user by the invited phone.
+      let invitedUser;
+
+      try {
+        invitedUser = await auth.getUserByPhoneNumber(invitedPhone);
+      } catch (error) {
+        if (error.code === 'auth/user-not-found') {
+          return {
+            success: true,
+            linked: false,
+            status: 'waiting_for_user',
+            message: 'The invited person has not registered yet.',
+          };
+        }
+
+        logger.error('Invited user lookup failed', {
+          accountId,
+          error,
+        });
+
+        throw new HttpsError(
+            'internal',
+            'Unable to look up invited user.',
+        );
+      }
+
+      if (invitedUser.uid === ownerUid) {
+        throw new HttpsError(
+            'failed-precondition',
+            'You cannot share an account with your own phone number.',
+        );
+      }
+
+      // Re-read and validate the account inside a transaction.
+      await db.runTransaction(async (transaction) => {
+        const latestSnapshot = await transaction.get(accountRef);
+
+        if (!latestSnapshot.exists) {
+          throw new HttpsError(
+              'not-found',
+              'Account not found.',
+          );
+        }
+
+        const latest = latestSnapshot.data();
+
+        if (
+          latest.ownerId !== ownerUid ||
+        latest.isShared !== true
+        ) {
+          throw new HttpsError(
+              'permission-denied',
+              'You are not allowed to link this account.',
+          );
+        }
+
+        const latestPhone = normalizePhone(
+            latest.invitedPhoneNormalized ||
+        latest.phoneNormalized ||
+        latest.phone,
+        );
+
+        if (latestPhone !== invitedPhone) {
+          throw new HttpsError(
+              'failed-precondition',
+              'The invited phone number has changed. Please try again.',
+          );
+        }
+
+        if (
+          latest.linkedUserId &&
+        latest.linkedUserId !== invitedUser.uid
+        ) {
+          throw new HttpsError(
+              'already-exists',
+              'This account is already linked to another user.',
+          );
+        }
+
+        const memberIds = Array.isArray(latest.memberIds) ?
+        latest.memberIds.map(String) :
+        [ownerUid];
+
+        if (!memberIds.includes(ownerUid)) {
+          memberIds.push(ownerUid);
+        }
+
+        if (!memberIds.includes(invitedUser.uid)) {
+          memberIds.push(invitedUser.uid);
+        }
+
+        transaction.update(accountRef, {
+          isShared: true,
+
+          linkedUserId: invitedUser.uid,
+
+          linkedUserName:
+          invitedUser.displayName ||
+          invitedUser.phoneNumber ||
+          null,
+
+          memberIds,
+
+          sharingStatus: 'shared',
+
+          joinedAt:
+          latest.joinedAt ||
+          admin.firestore.FieldValue.serverTimestamp(),
+
+          updatedAt:
+          admin.firestore.FieldValue.serverTimestamp(),
+        });
+      });
+
+      logger.info('Existing user linked to shared account', {
+        accountId,
+        ownerUid,
+        memberUid: invitedUser.uid,
+      });
+
+      return {
+        success: true,
+        linked: true,
+        status: 'shared',
+        linkedUserId: invitedUser.uid,
+        message: 'Existing user linked successfully.',
       };
     },
 );

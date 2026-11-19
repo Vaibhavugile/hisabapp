@@ -252,7 +252,7 @@ class _AccountDetailsScreenState extends State<AccountDetailsScreen> {
                     ),
                   ],
 
-                  if (pendingCount > 0) ...[
+                  if (isShared && pendingCount > 0) ...[
                     const SizedBox(height: 20),
                     _pendingBanner(pendingCount),
                   ],
@@ -300,6 +300,7 @@ class _AccountDetailsScreenState extends State<AccountDetailsScreen> {
                         entry,
                         business,
                         isOwner,
+                        isShared,
                         currentUid,
                         name,
                       );
@@ -466,7 +467,7 @@ class _AccountDetailsScreenState extends State<AccountDetailsScreen> {
           const SizedBox(width: 10),
           Expanded(
             child: Text(
-              '$count transaction${count == 1 ? '' : 's'} waiting for confirmation',
+              '$count transaction${count == 1 ? '' : 's'} waiting for the other member to confirm',
               style: const TextStyle(
                 fontWeight: FontWeight.w700,
                 color: Colors.orange,
@@ -519,6 +520,7 @@ class _AccountDetailsScreenState extends State<AccountDetailsScreen> {
     _LedgerEntry item,
     bool business,
     bool isOwner,
+    bool isShared,
     String currentUid,
     String accountName,
   ) {
@@ -528,7 +530,10 @@ class _AccountDetailsScreenState extends State<AccountDetailsScreen> {
     final status = _status(data);
     final createdBy = data['createdBy']?.toString() ?? '';
 
-    final canReview = status == 'pending' &&
+    // Only the other member of a genuinely shared account may review
+    // a pending entry. The creator must never approve or reject their own.
+    final canReview = isShared &&
+        status == 'pending' &&
         currentUid.isNotEmpty &&
         currentUid != createdBy;
 

@@ -2,6 +2,7 @@
 import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/foundation.dart';
@@ -175,6 +176,7 @@ class AccountProvider extends ChangeNotifier {
     required String type,
     required String category,
     String phone = '',
+    bool isShared = false,
   }) async {
     final user = FirebaseAuth.instance.currentUser;
 
@@ -186,7 +188,21 @@ class AccountProvider extends ChangeNotifier {
       throw ArgumentError('Account name is required.');
     }
 
-    final normalizedPhone = normalizePhoneNumber(phone);
+    if (isShared && phone.trim().isEmpty) {
+      throw ArgumentError(
+        'Enter the other person’s mobile number to share this account.',
+      );
+    }
+
+    if (!isShared && phone.trim().isNotEmpty) {
+      // A phone number alone must never grant another user access.
+      // Only explicitly shared accounts are eligible for phone matching.
+      _log('Phone provided for a private account; it will not be linked.');
+    }
+
+    final normalizedPhone = isShared
+        ? normalizePhoneNumber(phone)
+        : '';
 
     final accountRef = _db.collection('accounts').doc();
 
@@ -225,14 +241,14 @@ class AccountProvider extends ChangeNotifier {
         // Initially only the creator is a member.
         'memberIds': [user.uid],
 
-        'isShared': false,
-        'sharingStatus': normalizedPhone.isEmpty
-            ? 'private'
-            : 'waiting_for_user',
+        'isShared': isShared,
+        'sharingStatus': isShared
+            ? 'waiting_for_user'
+            : 'private',
 
-        'invitedAt': normalizedPhone.isEmpty
-            ? null
-            : FieldValue.serverTimestamp(),
+        'invitedAt': isShared
+            ? FieldValue.serverTimestamp()
+            : null,
 
         'joinedAt': null,
 
@@ -247,6 +263,36 @@ class AccountProvider extends ChangeNotifier {
       });
 
       _log('Account created successfully: ${accountRef.id}');
+
+      // If this is a shared account, ask the trusted Cloud Function to
+      // immediately link the invited person if their phone is already
+      // registered in Firebase Authentication.
+      //
+      // If they have not registered yet, keep the account in
+      // waiting_for_user state. The OTP verification function will link
+      // the account automatically when they register later.
+      if (isShared) {
+        try {
+          final callable = FirebaseFunctions.instance.httpsCallable(
+            'linkExistingSharedAccount',
+          );
+
+          await callable.call({
+            'accountId': accountRef.id,
+          });
+
+          _log('Existing invited user link check completed.');
+        } catch (linkError, linkStackTrace) {
+          // Do not undo account creation if the optional immediate-link
+          // check fails. The account remains shared and can be linked
+          // later by the OTP verification flow.
+          _logError(
+            'linkExistingSharedAccount',
+            linkError,
+            linkStackTrace,
+          );
+        }
+      }
 
       notifyListeners();
 

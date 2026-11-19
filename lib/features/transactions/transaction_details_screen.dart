@@ -20,7 +20,6 @@ class TransactionDetailsScreen extends StatelessWidget {
   DateTime? _dateValue(dynamic value) {
     if (value == null) return null;
     if (value is DateTime) return value;
-    if (value is DateTime) return value;
     try {
       return value.toDate();
     } catch (_) {
@@ -179,7 +178,9 @@ class TransactionDetailsScreen extends StatelessWidget {
         transaction['attachmentType']?.toString() ?? '';
 
     final createdByName =
-        transaction['createdByName']?.toString() ?? 'Unknown';
+        transaction['createdByName']?.toString().trim().isNotEmpty == true
+            ? transaction['createdByName'].toString().trim()
+            : 'Unknown member';
 
     final createdByRole =
         transaction['createdByRole']?.toString() ?? '';
@@ -244,6 +245,16 @@ class TransactionDetailsScreen extends StatelessWidget {
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: .85),
                     fontSize: 12,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  isOwner
+                      ? 'Shown from the account owner’s perspective'
+                      : 'Shown from your perspective as the shared member',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: .72),
+                    fontSize: 10,
                   ),
                 ),
                 const SizedBox(height: 18),

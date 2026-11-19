@@ -389,21 +389,25 @@ class _AccountListScreenState extends State<AccountListScreen> {
       );
     }
 
-    if (isOwner && isShared) {
-      return _statusLabel(
-        'Shared account',
-        Icons.people_alt_outlined,
-        AppTheme.green,
-      );
-    }
-
+    // Show the waiting state before the general shared state.
+    // Otherwise every shared account owned by the current user would
+    // display "Shared account", even before the invited person joins.
     if (isOwner &&
+        isShared &&
         (sharingStatus == 'waiting_for_user' ||
             sharingStatus == 'invited')) {
       return _statusLabel(
         'Waiting for user to join',
         Icons.hourglass_empty_rounded,
         Colors.orange,
+      );
+    }
+
+    if (isOwner && isShared) {
+      return _statusLabel(
+        'Shared account',
+        Icons.people_alt_outlined,
+        AppTheme.green,
       );
     }
 
@@ -593,6 +597,7 @@ class _AddAccountSheetState extends State<_AddAccountSheet> {
 
   late String _category = widget.category;
 
+  bool _isShared = false;
   bool _saving = false;
 
   void _log(String message) {
@@ -709,6 +714,42 @@ class _AddAccountSheetState extends State<_AddAccountSheet> {
                         }
                       },
               ),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  color: _isShared
+                      ? AppTheme.green.withValues(alpha: .07)
+                      : Colors.grey.withValues(alpha: .05),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: _isShared
+                        ? AppTheme.green.withValues(alpha: .25)
+                        : AppTheme.line,
+                  ),
+                ),
+                child: SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  value: _isShared,
+                  activeColor: AppTheme.green,
+                  title: const Text(
+                    'Share this account',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  subtitle: const Text(
+                    'Let the other person view and manage this ledger after verifying their phone number.',
+                    style: TextStyle(fontSize: 12, height: 1.35),
+                  ),
+                  onChanged: _saving
+                      ? null
+                      : (value) {
+                          setState(() => _isShared = value);
+                        },
+                ),
+              ),
               const SizedBox(height: 12),
               TextField(
                 controller: _phone,
@@ -716,12 +757,15 @@ class _AddAccountSheetState extends State<_AddAccountSheet> {
                 keyboardType: TextInputType.phone,
                 maxLength: 10,
                 decoration: InputDecoration(
-                  labelText: 'Other person mobile number',
+                  labelText: _isShared
+                      ? 'Other person mobile number *'
+                      : 'Other person mobile number (optional)',
                   hintText: '10-digit mobile number',
                   prefixIcon: const Icon(Icons.phone_outlined),
                   prefixText: '+91 ',
-                  helperText:
-                      'They can install Hisaab and access this ledger later after phone verification.',
+                  helperText: _isShared
+                      ? 'Access is granted only after they verify this exact number in Hisaab.'
+                      : 'A number entered here will not grant access unless Share this account is enabled.',
                   counterText: '',
                 ),
               ),
@@ -735,19 +779,21 @@ class _AddAccountSheetState extends State<_AddAccountSheet> {
                     color: AppTheme.green.withValues(alpha: .18),
                   ),
                 ),
-                child: const Row(
+                child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(
+                    const Icon(
                       Icons.info_outline,
                       color: AppTheme.green,
                       size: 19,
                     ),
-                    SizedBox(width: 9),
+                    const SizedBox(width: 9),
                     Expanded(
                       child: Text(
-                        'You can start managing this ledger immediately. The other person does not need to install or accept anything now.',
-                        style: TextStyle(
+                        _isShared
+                            ? 'You can use this ledger immediately. The other person can join later by verifying the mobile number above.'
+                            : 'This ledger will remain private to your account. You can create a shared ledger by enabling Share this account.',
+                        style: const TextStyle(
                           fontSize: 12,
                           height: 1.4,
                         ),
@@ -794,6 +840,15 @@ class _AddAccountSheetState extends State<_AddAccountSheet> {
 
     final phone = _phone.text.trim();
 
+    if (_isShared && phone.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Enter the other person’s mobile number to share this account.'),
+        ),
+      );
+      return;
+    }
+
     if (phone.isNotEmpty &&
         !RegExp(r'^[6-9]\d{9}$').hasMatch(phone)) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -817,6 +872,7 @@ class _AddAccountSheetState extends State<_AddAccountSheet> {
                 type: widget.type,
                 category: _category,
                 phone: phone,
+                isShared: _isShared,
               );
 
       _log('Account created: $accountId');
@@ -826,9 +882,11 @@ class _AddAccountSheetState extends State<_AddAccountSheet> {
       Navigator.pop(context);
 
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+        SnackBar(
           content: Text(
-            'Account created successfully.',
+            _isShared
+                ? 'Shared account created. The other person can join by verifying the invited phone number.'
+                : 'Account created successfully.',
           ),
         ),
       );
