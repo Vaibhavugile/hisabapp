@@ -7,14 +7,12 @@ import '../../core/theme/app_theme.dart';
 
 class TransactionDetailsScreen extends StatelessWidget {
   final String accountName;
-  final String accountPhone;
   final Map<String, dynamic> transaction;
   final bool isOwner;
 
   const TransactionDetailsScreen({
     super.key,
     required this.accountName,
-    required this.accountPhone,
     required this.transaction,
     required this.isOwner,
   });
@@ -277,8 +275,6 @@ class TransactionDetailsScreen extends StatelessWidget {
             icon: Icons.account_balance_wallet_outlined,
             children: [
               _detailRow('Account', accountName),
-              if (accountPhone.trim().isNotEmpty)
-                _detailRow('Phone number', accountPhone.trim()),
               _detailRow('Transaction type', _typeLabel(type)),
               _detailRow(
                 'Transaction date',

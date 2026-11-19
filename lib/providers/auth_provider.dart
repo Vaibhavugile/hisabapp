@@ -1,43 +1,114 @@
+
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/foundation.dart';
 
 class HisaabAuthProvider extends ChangeNotifier {
   final FirebaseAuth _auth = FirebaseAuth.instance;
-  String? _verificationId;
+
+  final FirebaseFunctions _functions =
+      FirebaseFunctions.instanceFor(region: 'asia-south1');
+
   bool _loading = false;
   String? _error;
+  String? _pendingPhone;
+
   User? get user => _auth.currentUser;
   bool get loading => _loading;
   String? get error => _error;
   Stream<User?> get authState => _auth.authStateChanges();
 
+  /// Sends OTP through MSG91 WhatsApp Authentication template.
   Future<void> sendOtp(String phone) async {
-    _setLoading(true); _error = null;
+    _setLoading(true);
+    _error = null;
+
     try {
-      await _auth.verifyPhoneNumber(
-        phoneNumber: phone,
-        timeout: const Duration(seconds: 60),
-        verificationCompleted: (credential) async { await _auth.signInWithCredential(credential); },
-        verificationFailed: (e) { _error = e.message ?? 'Phone verification failed'; notifyListeners(); },
-        codeSent: (id, _) { _verificationId = id; notifyListeners(); },
-        codeAutoRetrievalTimeout: (id) { _verificationId = id; },
-      );
-    } on FirebaseAuthException catch (e) { _error = e.message ?? e.code; }
-    finally { _setLoading(false); }
+      final normalizedPhone = phone.trim();
+
+      if (!RegExp(r'^\+[1-9]\d{7,14}$').hasMatch(normalizedPhone)) {
+        throw Exception(
+          'Enter a valid phone number with country code.',
+        );
+      }
+
+      final callable = _functions.httpsCallable('sendWhatsAppOtp');
+
+      await callable.call({
+        'phone': normalizedPhone,
+      });
+
+      _pendingPhone = normalizedPhone;
+    } on FirebaseFunctionsException catch (e) {
+      _error = e.message ?? 'Unable to send WhatsApp OTP.';
+    } catch (e) {
+      _error = e.toString().replaceFirst('Exception: ', '');
+    } finally {
+      _setLoading(false);
+    }
   }
 
+  /// Verifies OTP through backend and signs into Firebase using custom token.
   Future<bool> verifyOtp(String code) async {
-    if (_verificationId == null) { _error = 'Please request a verification code first.'; notifyListeners(); return false; }
-    _setLoading(true); _error = null;
+    _setLoading(true);
+    _error = null;
+
     try {
-      final credential = PhoneAuthProvider.credential(verificationId: _verificationId!, smsCode: code);
-      await _auth.signInWithCredential(credential);
+      if (_pendingPhone == null) {
+        throw Exception('Please request a verification code first.');
+      }
+
+      if (!RegExp(r'^\d{6}$').hasMatch(code)) {
+        throw Exception('Enter a valid 6-digit OTP.');
+      }
+
+      final callable = _functions.httpsCallable('verifyWhatsAppOtp');
+
+      final result = await callable.call({
+        'phone': _pendingPhone,
+        'otp': code,
+      });
+
+      final data = Map<String, dynamic>.from(result.data as Map);
+
+      final customToken = data['customToken'] as String?;
+
+      if (customToken == null || customToken.isEmpty) {
+        throw Exception('Verification succeeded but login token was missing.');
+      }
+
+      await _auth.signInWithCustomToken(customToken);
+
+      _pendingPhone = null;
       return true;
-    } on FirebaseAuthException catch (e) { _error = e.message ?? e.code; return false; }
-    finally { _setLoading(false); }
+    } on FirebaseFunctionsException catch (e) {
+      _error = e.message ?? 'OTP verification failed.';
+      return false;
+    } on FirebaseAuthException catch (e) {
+      _error = e.message ?? 'Firebase login failed.';
+      return false;
+    } catch (e) {
+      _error = e.toString().replaceFirst('Exception: ', '');
+      return false;
+    } finally {
+      _setLoading(false);
+    }
   }
 
-  Future<void> signOut() async => _auth.signOut();
-  void clearError() { _error = null; notifyListeners(); }
-  void _setLoading(bool value) { _loading = value; notifyListeners(); }
+  Future<void> signOut() async {
+    await _auth.signOut();
+    _pendingPhone = null;
+    _error = null;
+    notifyListeners();
+  }
+
+  void clearError() {
+    _error = null;
+    notifyListeners();
+  }
+
+  void _setLoading(bool value) {
+    _loading = value;
+    notifyListeners();
+  }
 }
